@@ -111,7 +111,7 @@ elif module == "Truncated Severity":
     st.text(model.summary())
 
 # ===============================================================
-# 3️⃣ INFLATION ADJUSTMENT
+# 3️⃣ INFLATION ADJUSTMENT 
 # ===============================================================
 
 elif module == "Inflation Adjustment":
