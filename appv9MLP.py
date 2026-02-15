@@ -1,6 +1,6 @@
 # ===============================
-# INSURANCE PRICING & RISK APP
-# Fully corrected for freMTPL2 dataset
+# INSURANCE PRICING ENGINE APP
+# GLM vs ML Pricing Comparison
 # ===============================
 
 import streamlit as st
@@ -14,14 +14,15 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
 import statsmodels.api as sm
+
 import shap
 
 st.set_page_config(layout="wide")
-st.title("🚀 Insurance Pricing & Risk Platform (freMTPL2)")
 
 # ===============================
 # DATA LOADING
 # ===============================
+
 @st.cache_data
 def load_data():
     freq = fetch_openml(name="freMTPL2freq", version=1, as_frame=True)
@@ -29,45 +30,53 @@ def load_data():
 
     df = freq.frame.merge(sev.frame, how="left", on="IDpol")
     df["ClaimAmount"] = df["ClaimAmount"].fillna(0)
+
+    # Exposure validation
     df = df[(df["Exposure"] > 0) & (df["Exposure"] <= 1)]
+
     return df
 
 df = load_data()
-st.write("Dataset loaded successfully!")
-st.write("Columns:", df.columns.tolist())
+
+st.title("Insurance Pricing Engine: GLM vs ML")
 
 # ===============================
-# FEATURE SELECTION
+# FEATURE ENGINEERING
 # ===============================
-features = ["VehPower", "VehAge", "DrivAge", "Brand", "Gas", "Region"]
-df_model = df[features + ["ClaimNb", "ClaimAmount", "Exposure"]].copy()
+
+df["Frequency"] = df["ClaimNb"] / df["Exposure"]
+
+features = ["Power", "CarAge", "DriverAge", "Brand", "Gas", "Region"]
+
+df_model = df[features + ["Frequency", "ClaimAmount", "Exposure"]].copy()
 df_model = pd.get_dummies(df_model, drop_first=True)
 
-X = df_model.drop(["ClaimNb","ClaimAmount"], axis=1)
-y_freq = df_model["ClaimNb"]/df_model["Exposure"]
+X = df_model.drop(["Frequency", "ClaimAmount"], axis=1)
+y_freq = df_model["Frequency"]
 y_sev = df_model["ClaimAmount"]
 
 X_train, X_test, y_freq_train, y_freq_test = train_test_split(X, y_freq, test_size=0.3, random_state=42)
 _, _, y_sev_train, y_sev_test = train_test_split(X, y_sev, test_size=0.3, random_state=42)
 
 # ===============================
-# TABS
+# TAB LAYOUT
 # ===============================
-tabs = st.tabs([
-    "Model Training", "Pricing Engine", "Lift Curve",
-    "Explainability", "New Business Upload", "Profit & Capital", "Model Validation"
-])
+
+tab1, tab2, tab3, tab4 = st.tabs(["Model Training", "Pricing Engine", "Lift Curve", "Explainability"])
 
 # ===============================
 # TAB 1: MODEL TRAINING
 # ===============================
-with tabs[0]:
+
+with tab1:
+
     st.header("Model Training")
 
     # GLM Frequency
     X_train_glm = sm.add_constant(X_train)
     glm_freq = sm.GLM(y_freq_train, X_train_glm,
-                      family=sm.families.Poisson())
+                      family=sm.families.Poisson(),
+                      offset=np.log(X_train["Exposure"]))
     glm_freq_result = glm_freq.fit()
 
     # GLM Severity
@@ -76,10 +85,11 @@ with tabs[0]:
                      family=sm.families.Gamma(link=sm.families.links.log()))
     glm_sev_result = glm_sev.fit()
 
-    # ML Severity
+    # ML Severity Model
     rf_model = RandomForestRegressor(n_estimators=100, max_depth=8, random_state=42)
     rf_model.fit(X_train, y_sev_train)
 
+    # Evaluate
     sev_pred_glm = glm_sev_result.predict(sm.add_constant(X_test))
     sev_pred_ml = rf_model.predict(X_test)
 
@@ -87,19 +97,29 @@ with tabs[0]:
     rmse_ml = np.sqrt(mean_squared_error(y_sev_test, sev_pred_ml))
 
     col1, col2 = st.columns(2)
-    col1.metric("GLM Severity RMSE", round(rmse_glm,2))
-    col2.metric("ML Severity RMSE", round(rmse_ml,2))
+    col1.metric("GLM Severity RMSE", round(rmse_glm, 2))
+    col2.metric("ML Severity RMSE", round(rmse_ml, 2))
 
 # ===============================
 # TAB 2: PRICING ENGINE
 # ===============================
-with tabs[1]:
+
+with tab2:
+
     st.header("Pricing Engine")
 
-    pricing_model = st.radio("Select Pricing Engine:", ["GLM Pricing","ML Severity Pricing"])
+    pricing_model = st.radio("Select Pricing Engine:",
+                             ["GLM Pricing", "ML Severity Pricing"])
 
-    freq_pred = glm_freq_result.predict(sm.add_constant(X_test))
-    sev_pred = sev_pred_glm if pricing_model=="GLM Pricing" else sev_pred_ml
+    # Frequency prediction (always GLM)
+    freq_pred = glm_freq_result.predict(sm.add_constant(X_test),
+                                        offset=np.log(X_test["Exposure"]))
+
+    # Severity selection
+    if pricing_model == "GLM Pricing":
+        sev_pred = sev_pred_glm
+    else:
+        sev_pred = sev_pred_ml
 
     premium = freq_pred * sev_pred
 
@@ -108,131 +128,71 @@ with tabs[1]:
         "Severity": sev_pred,
         "Premium": premium
     })
+
     st.write(df_pricing.head())
 
     # Premium comparison
     premium_glm = freq_pred * sev_pred_glm
     premium_ml = freq_pred * sev_pred_ml
+
     diff = premium_ml - premium_glm
 
     fig = plt.figure(figsize=(10,6))
     plt.hist(diff, bins=50)
-    plt.title("Premium Difference: ML - GLM")
+    plt.title("Premium Difference: ML - GLM", fontsize=14)
+    plt.xlabel("Premium Difference")
+    plt.ylabel("Count")
     st.pyplot(fig)
 
 # ===============================
 # TAB 3: LIFT CURVE
 # ===============================
-with tabs[2]:
+
+with tab3:
+
     st.header("Lift Curve")
+
     actual = y_sev_test.reset_index(drop=True)
     predicted = sev_pred_ml
 
-    lift_df = pd.DataFrame({"Actual": actual, "Predicted": predicted})
+    lift_df = pd.DataFrame({
+        "Actual": actual,
+        "Predicted": predicted
+    })
+
     lift_df = lift_df.sort_values("Predicted", ascending=False)
     lift_df["Cumulative Actual"] = lift_df["Actual"].cumsum()
     lift_df["Cumulative %"] = lift_df["Cumulative Actual"] / lift_df["Actual"].sum()
 
     fig2 = plt.figure(figsize=(10,6))
     plt.plot(lift_df["Cumulative %"].values)
-    plt.title("Lift Curve (ML Severity)")
+    plt.title("Lift Curve (ML Severity)", fontsize=14)
+    plt.xlabel("Policies (sorted by predicted risk)")
+    plt.ylabel("Cumulative % of Loss")
     st.pyplot(fig2)
 
 # ===============================
 # TAB 4: EXPLAINABILITY
 # ===============================
-with tabs[3]:
+
+with tab4:
+
     st.header("Feature Importance & SHAP")
 
-    importance = pd.Series(rf_model.feature_importances_, index=X.columns).sort_values(ascending=False).head(15)
+    # Feature Importance
+    importance = pd.Series(rf_model.feature_importances_, index=X.columns)
+    importance = importance.sort_values(ascending=False).head(15)
+
     fig3 = plt.figure(figsize=(10,6))
     importance.plot(kind="bar")
-    plt.title("Top 15 Feature Importance")
+    plt.title("Top 15 Feature Importance (Random Forest)", fontsize=14)
     st.pyplot(fig3)
 
+    # SHAP
     explainer = shap.TreeExplainer(rf_model)
     shap_values = explainer.shap_values(X_test[:500])
+
     fig4 = plt.figure(figsize=(10,6))
     shap.summary_plot(shap_values, X_test[:500], show=False)
     st.pyplot(fig4)
 
-# ===============================
-# TAB 5: NEW BUSINESS UPLOAD
-# ===============================
-with tabs[4]:
-    st.header("Score New Business CSV")
-
-    uploaded_file = st.file_uploader("Upload CSV with same columns as training data", type=["csv"])
-    if uploaded_file:
-        new_df = pd.read_csv(uploaded_file)
-        new_df_encoded = pd.get_dummies(new_df, drop_first=True)
-        missing_cols = set(X.columns) - set(new_df_encoded.columns)
-        for col in missing_cols:
-            new_df_encoded[col] = 0
-        new_df_encoded = new_df_encoded[X.columns]
-
-        freq_new = glm_freq_result.predict(sm.add_constant(new_df_encoded))
-        sev_new = rf_model.predict(new_df_encoded) if pricing_model=="ML Severity Pricing" else glm_sev_result.predict(sm.add_constant(new_df_encoded))
-        premium_new = freq_new * sev_new
-
-        new_df["Pred_Freq"] = freq_new
-        new_df["Pred_Sev"] = sev_new
-        new_df["Premium"] = premium_new
-        st.dataframe(new_df.head())
-
-# ===============================
-# TAB 6: PROFITABILITY & CAPITAL
-# ===============================
-with tabs[5]:
-    st.header("Portfolio Profitability & Capital Simulation")
-
-    n_sim = st.slider("Number of Simulations", 1000, 10000, 5000)
-    total_losses = []
-
-    for _ in range(n_sim):
-        freq_sim = np.random.poisson(freq_pred.mean())
-        sev_sim = np.random.gamma(2, sev_pred.mean()/2)
-        total_losses.append(freq_sim*sev_sim)
-
-    total_premium = premium.sum()
-    expected_loss = np.mean(total_losses)
-    profit = total_premium - expected_loss
-    var95 = np.percentile(total_losses,95)
-    var99 = np.percentile(total_losses,99)
-
-    st.metric("Expected Portfolio Profit", round(profit,2))
-    st.metric("VaR 95%", round(var95,2))
-    st.metric("VaR 99%", round(var99,2))
-
-    fig5 = plt.figure(figsize=(10,6))
-    plt.hist(total_losses, bins=50)
-    plt.title("Portfolio Loss Simulation")
-    st.pyplot(fig5)
-
-# ===============================
-# TAB 7: MODEL VALIDATION
-# ===============================
-with tabs[6]:
-    st.header("Model Validation Dashboard")
-
-    df_val = pd.DataFrame({
-        "Actual": y_sev_test.reset_index(drop=True),
-        "Pred_GLM": sev_pred_glm,
-        "Pred_ML": sev_pred_ml
-    })
-    st.dataframe(df_val.head())
-
-    fig6 = plt.figure(figsize=(10,6))
-    plt.scatter(df_val["Pred_GLM"], df_val["Actual"], alpha=0.5, label="GLM")
-    plt.scatter(df_val["Pred_ML"], df_val["Actual"], alpha=0.5, label="ML")
-    plt.plot([0, df_val["Actual"].max()], [0, df_val["Actual"].max()], "k--")
-    plt.xlabel("Predicted Severity")
-    plt.ylabel("Actual Severity")
-    plt.legend()
-    plt.title("Actual vs Predicted Severity")
-    st.pyplot(fig6)
-
-    rmse_glm_val = np.sqrt(mean_squared_error(df_val["Actual"], df_val["Pred_GLM"]))
-    rmse_ml_val = np.sqrt(mean_squared_error(df_val["Actual"], df_val["Pred_ML"]))
-    st.metric("Validation RMSE GLM", round(rmse_glm_val,2))
-    st.metric("Validation RMSE ML", round(rmse_ml_val,2))
