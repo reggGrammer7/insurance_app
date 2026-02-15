@@ -1,6 +1,6 @@
 # ===============================
-# INSURANCE PRICING ENGINE APP
-# PRODUCTION-READY VERSION
+# INSURANCE PRICING & RISK APP
+# Fully corrected for freMTPL2 dataset
 # ===============================
 
 import streamlit as st
@@ -14,12 +14,10 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
 import statsmodels.api as sm
-
 import shap
 
 st.set_page_config(layout="wide")
-
-st.title("🚀 Insurance Pricing & Risk Platform")
+st.title("🚀 Insurance Pricing & Risk Platform (freMTPL2)")
 
 # ===============================
 # DATA LOADING
@@ -35,12 +33,13 @@ def load_data():
     return df
 
 df = load_data()
+st.write("Dataset loaded successfully!")
+st.write("Columns:", df.columns.tolist())
 
 # ===============================
-# FEATURES & MODEL PREP
+# FEATURE SELECTION
 # ===============================
-
-features = ["Power", "CarAge", "DriverAge", "Brand", "Gas", "Region"]
+features = ["VehPower", "VehAge", "DrivAge", "Brand", "Gas", "Region"]
 df_model = df[features + ["ClaimNb", "ClaimAmount", "Exposure"]].copy()
 df_model = pd.get_dummies(df_model, drop_first=True)
 
@@ -52,9 +51,8 @@ X_train, X_test, y_freq_train, y_freq_test = train_test_split(X, y_freq, test_si
 _, _, y_sev_train, y_sev_test = train_test_split(X, y_sev, test_size=0.3, random_state=42)
 
 # ===============================
-# TAB LAYOUT
+# TABS
 # ===============================
-
 tabs = st.tabs([
     "Model Training", "Pricing Engine", "Lift Curve",
     "Explainability", "New Business Upload", "Profit & Capital", "Model Validation"
@@ -112,7 +110,7 @@ with tabs[1]:
     })
     st.write(df_pricing.head())
 
-    # Compare premiums
+    # Premium comparison
     premium_glm = freq_pred * sev_pred_glm
     premium_ml = freq_pred * sev_pred_ml
     diff = premium_ml - premium_glm
@@ -146,14 +144,12 @@ with tabs[2]:
 with tabs[3]:
     st.header("Feature Importance & SHAP")
 
-    # Feature importance
     importance = pd.Series(rf_model.feature_importances_, index=X.columns).sort_values(ascending=False).head(15)
     fig3 = plt.figure(figsize=(10,6))
     importance.plot(kind="bar")
     plt.title("Top 15 Feature Importance")
     st.pyplot(fig3)
 
-    # SHAP summary
     explainer = shap.TreeExplainer(rf_model)
     shap_values = explainer.shap_values(X_test[:500])
     fig4 = plt.figure(figsize=(10,6))
@@ -173,7 +169,7 @@ with tabs[4]:
         missing_cols = set(X.columns) - set(new_df_encoded.columns)
         for col in missing_cols:
             new_df_encoded[col] = 0
-        new_df_encoded = new_df_encoded[X.columns]  # align columns
+        new_df_encoded = new_df_encoded[X.columns]
 
         freq_new = glm_freq_result.predict(sm.add_constant(new_df_encoded))
         sev_new = rf_model.predict(new_df_encoded) if pricing_model=="ML Severity Pricing" else glm_sev_result.predict(sm.add_constant(new_df_encoded))
@@ -190,8 +186,6 @@ with tabs[4]:
 with tabs[5]:
     st.header("Portfolio Profitability & Capital Simulation")
 
-    st.write("Simulate profitability and capital requirements based on predicted premiums")
-
     n_sim = st.slider("Number of Simulations", 1000, 10000, 5000)
     total_losses = []
 
@@ -203,7 +197,6 @@ with tabs[5]:
     total_premium = premium.sum()
     expected_loss = np.mean(total_losses)
     profit = total_premium - expected_loss
-
     var95 = np.percentile(total_losses,95)
     var99 = np.percentile(total_losses,99)
 
@@ -217,12 +210,11 @@ with tabs[5]:
     st.pyplot(fig5)
 
 # ===============================
-# TAB 7: MODEL VALIDATION DASHBOARD
+# TAB 7: MODEL VALIDATION
 # ===============================
 with tabs[6]:
-    st.header("Model Validation")
+    st.header("Model Validation Dashboard")
 
-    st.write("Compare Actual vs Predicted Severity")
     df_val = pd.DataFrame({
         "Actual": y_sev_test.reset_index(drop=True),
         "Pred_GLM": sev_pred_glm,
