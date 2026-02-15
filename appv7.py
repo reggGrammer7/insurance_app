@@ -82,7 +82,7 @@ if module == "Dashboard":
     fig = px.histogram(
         df[df["ClaimAmount"]>0],
         x="ClaimAmount",
-        nbins=150,
+        nbins=50,
         title="Claim Severity Distribution"
     )
     fig.update_layout(
