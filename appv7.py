@@ -74,10 +74,13 @@ module = st.sidebar.selectbox(
 
 if module == "Dashboard":
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4, col5= st.columns(5)
     col1.metric("Frequency", round(frequency,4))
     col2.metric("Severity", round(severity,2))
     col3.metric("Pure Premium", round(pure_premium,2))
+    col4.metric("Total Loss", round(total_loss,2))
+    col5.metric("Total Exposure", round(total_exposure,2))
+
 
     fig = px.histogram(
         df[df["ClaimAmount"]>0],
