@@ -46,7 +46,22 @@ st.title("Insurance Pricing Engine: GLM vs ML")
 
 df["Frequency"] = df["ClaimNb"] / df["Exposure"]
 
-features = ["Power", "CarAge", "DriverAge", "Brand", "Gas", "Region"]
+feature_aliases = {
+    "Power": ["Power", "VehPower"],
+    "CarAge": ["CarAge", "VehAge"],
+    "DriverAge": ["DriverAge", "DrivAge"],
+    "Brand": ["Brand", "VehBrand"],
+    "Gas": ["Gas", "VehGas"],
+    "Region": ["Region"],
+}
+
+features = []
+for name, candidates in feature_aliases.items():
+    selected = next((c for c in candidates if c in df.columns), None)
+    if selected is None:
+        st.error(f"Missing required feature for {name}. Tried: {candidates}")
+        st.stop()
+    features.append(selected)
 
 df_model = df[features + ["Frequency", "ClaimAmount", "Exposure"]].copy()
 df_model = pd.get_dummies(df_model, drop_first=True)
