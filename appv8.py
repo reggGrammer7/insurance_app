@@ -90,7 +90,7 @@ with tabs[1]:
     st.write("Average Predicted Frequency:", round(df["Pred_Freq"].mean(),4))
 
     fig2 = plt.figure(figsize=(12,6))
-    plt.hist(df["Pred_Freq"], bins=50)
+    plt.hist(np.log1p(df["Pred_Freq"]), bins=50)
     plt.title("Predicted Frequency Distribution")
     st.pyplot(fig2)
 
