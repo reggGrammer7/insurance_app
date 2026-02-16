@@ -64,11 +64,11 @@ for name, candidates in feature_aliases.items():
     features.append(selected)
 
 df_model = df[features + ["Frequency", "ClaimAmount", "Exposure"]].copy()
-df_model = pd.get_dummies(df_model, drop_first=True)
+df_model = pd.get_dummies(df_model, drop_first=True, dtype=float)
 
-X = df_model.drop(["Frequency", "ClaimAmount"], axis=1)
-y_freq = df_model["Frequency"]
-y_sev = df_model["ClaimAmount"]
+X = df_model.drop(["Frequency", "ClaimAmount"], axis=1).astype(float)
+y_freq = pd.to_numeric(df_model["Frequency"], errors="coerce").astype(float)
+y_sev = pd.to_numeric(df_model["ClaimAmount"], errors="coerce").astype(float)
 
 X_train, X_test, y_freq_train, y_freq_test = train_test_split(X, y_freq, test_size=0.3, random_state=42)
 _, _, y_sev_train, y_sev_test = train_test_split(X, y_sev, test_size=0.3, random_state=42)
