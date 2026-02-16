@@ -89,10 +89,10 @@ with tabs[1]:
 
     st.write("Average Predicted Frequency:", round(df["Pred_Freq"].mean(),4))
 
-    fig1 = plt.figure(figsize=(12,6))
+    fig2 = plt.figure(figsize=(12,6))
     plt.hist(df["Pred_Freq"], bins=50)
     plt.title("Predicted Frequency Distribution")
-    st.pyplot(fig1)
+    st.pyplot(fig2)
 
     st.subheader("Severity Model (Gamma)")
 
@@ -107,6 +107,11 @@ with tabs[1]:
     df["Pred_Sev"] = sev_model.predict(df)
 
     st.write("Average Predicted Severity:", round(df["Pred_Sev"].mean(),2))
+    fig1 = plt.figure(figsize=(12,6))
+    plt.hist(df["Pred_Sev"], bins=50)
+    plt.title("Predicted Severity Distribution")
+    st.pyplot(fig1)
+
 
 # =====================================================
 # TAB 3: PREMIUM & ADJUSTMENTS
