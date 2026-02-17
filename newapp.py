@@ -45,8 +45,8 @@ df = load_data()
 # =====================================================
 st.header("1. Model Training")
 
-freq_formula = "ClaimNb ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + Density_log"
-sev_formula  = "ClaimAmount ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + Density_log"
+freq_formula = "ClaimNb ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + np.log(Density)"
+sev_formula  = "ClaimAmount ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + np.log(Density)"
 
 st.write("Training Poisson frequency model...")
 freq_pois = glm(freq_formula, data=df, family=Poisson()).fit()
