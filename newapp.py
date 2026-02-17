@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import shap
-
+from sklearn.datasets import fetch_openml
 from statsmodels.formula.api import glm
 from statsmodels.genmod.families import Poisson, Gamma, NegativeBinomial
 from statsmodels.discrete.count_model import ZeroInflatedPoisson
@@ -17,14 +17,29 @@ st.title("📊 Advanced Motor Insurance Pricing Platform")
 # =====================================================
 # DATA LOADING
 # =====================================================
+
 @st.cache_data
 def load_data():
-    df = pd.read_csv("freMTPL2freq.csv")  # adjust path
-    df["Density_log"] = np.log(df["Density"])
+    freq = fetch_openml(name="freMTPL2freq", version=1, as_frame=True)
+    sev = fetch_openml(name="freMTPL2sev", version=1, as_frame=True)
+
+    df = freq.frame.merge(sev.frame, how="left", on="IDpol")
+    df["ClaimAmount"] = df["ClaimAmount"].fillna(0)
+
+    numeric_cols = [
+        "ClaimNb", "Exposure", "ClaimAmount",
+        "VehPower", "VehAge", "DrivAge", "BonusMalus"
+    ]
+
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df[(df["Exposure"] > 0) & (df["Exposure"] <= 1)]
+    df = df.dropna()
+
     return df
 
 df = load_data()
-
 # =====================================================
 # MODEL TRAINING
 # =====================================================
