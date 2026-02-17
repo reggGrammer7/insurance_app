@@ -63,6 +63,8 @@ st.write("Training Zero-Inflated Poisson frequency model...")
 zip_exog = df[["VehPower", "VehAge", "DrivAge", "BonusMalus", "Density"]]
 zip_endog = df["ClaimNb"]
 freq_zip = ZeroInflatedPoisson(zip_endog, zip_exog, exog_infl=zip_exog, inflation="logit").fit(disp=0)
+freq_zinb = ZeroInflatedNegativeBinomial(zip_endog, zip_exog, exog_infl=zip_exog, inflation="logit").fit(disp=0)
+
 
 st.write("Training Gamma severity model (ClaimNb > 0)...")
 sev_data = df[df["ClaimNb"] > 0].copy()
@@ -96,6 +98,9 @@ df["pred_freq_nb"] = freq_nb.predict(df)
 # For ZIP, need same exog structure
 df_zip_exog = df[["VehPower", "VehAge", "DrivAge", "BonusMalus", "Density"]]
 df["pred_freq_zip"] = freq_zip.predict(df_zip_exog)
+# For ZINB, would need to implement custom predict function to combine count and inflation parts
+df_zip_exog = df[["VehPower", "VehAge", "DrivAge", "BonusMalus", "Density"]]
+df["pred_freq_zip"] = freq_zinb.predict(df_zip_exog)
 
 df["pred_sev"] = sev.predict(df)
 df["pure_premium_pois"] = df["pred_freq_pois"] * df["pred_sev"]
