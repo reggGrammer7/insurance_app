@@ -1,281 +1,310 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
+import warnings
+
 import matplotlib.pyplot as plt
-from statsmodels.formula.api import glm
-from statsmodels.genmod.families import Poisson, Gamma
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error
-from sklearn.ensemble import RandomForestRegressor
-from xgboost import XGBRegressor
-from statsmodels.genmod.families import Poisson, Gamma, NegativeBinomial
-from statsmodels.discrete.count_model import ZeroInflatedPoisson
+import numpy as np
+import pandas as pd
+import streamlit as st
+from scipy.stats import gamma as gamma_dist
+from scipy.stats import genpareto
 from sklearn.datasets import fetch_openml
-import shap
+from statsmodels.api import add_constant
+from statsmodels.discrete.count_model import (
+    ZeroInflatedNegativeBinomialP,
+    ZeroInflatedPoisson,
+)
+from statsmodels.formula.api import glm, ols
+from statsmodels.genmod.families import Binomial, Gamma, InverseGaussian, NegativeBinomial, Poisson
+
+warnings.filterwarnings("ignore")
 
 st.set_page_config(layout="wide")
-st.title("📊 Advanced Actuarial Pricing Platform with Territorial Modeling")
+st.title("Territorial Frequency and Severity Dashboard")
 
-# =====================================================
-# DATA LOADING
-# =====================================================
 
 @st.cache_data
-def load_data():
+def load_data() -> pd.DataFrame:
     freq = fetch_openml(name="freMTPL2freq", version=1, as_frame=True)
     sev = fetch_openml(name="freMTPL2sev", version=1, as_frame=True)
 
     df = freq.frame.merge(sev.frame, how="left", on="IDpol")
-    df["ClaimAmount"] = df["ClaimAmount"].fillna(0)
+    df["ClaimAmount"] = df["ClaimAmount"].fillna(0.0)
 
     numeric_cols = [
-        "ClaimNb", "Exposure", "ClaimAmount",
-        "VehPower", "VehAge", "DrivAge",
-        "BonusMalus", "Density"
+        "ClaimNb",
+        "Exposure",
+        "ClaimAmount",
+        "VehPower",
+        "VehAge",
+        "DrivAge",
+        "BonusMalus",
+        "Density",
     ]
-
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df = df[(df["Exposure"] > 0) & (df["Exposure"] <= 1)]
-    df = df.dropna()
+    df = df[(df["Exposure"] > 0) & (df["Exposure"] <= 1)].copy()
+    df = df.dropna().copy()
 
+    df["log_density"] = np.log(np.clip(df["Density"], 1e-9, None))
+    df["log_exposure"] = np.log(np.clip(df["Exposure"], 1e-9, None))
     return df
 
+
+def metric_name_and_direction(model_rows: list[dict], preferred: str = "AIC") -> tuple[str, bool]:
+    if preferred == "AIC" and all(np.isfinite(x.get("aic", np.nan)) for x in model_rows):
+        return "AIC", True
+    if all(np.isfinite(x.get("llf", np.nan)) for x in model_rows):
+        return "LogLik", False
+    return "AIC", True
+
+
+def fit_frequency_models(df: pd.DataFrame) -> tuple[dict, pd.DataFrame, str, str]:
+    formula = "ClaimNb ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + log_density"
+    offset = df["log_exposure"]
+
+    pois = glm(formula=formula, data=df, family=Poisson(), offset=offset).fit()
+    nb = glm(formula=formula, data=df, family=NegativeBinomial(), offset=offset).fit()
+
+    x = pd.get_dummies(
+        df[["VehPower", "VehAge", "DrivAge", "BonusMalus", "log_density", "Region"]],
+        columns=["Region"],
+        drop_first=True,
+    )
+    x = add_constant(x, has_constant="add")
+    y = df["ClaimNb"].astype(int)
+
+    zip_model = ZeroInflatedPoisson(
+        endog=y,
+        exog=x,
+        exog_infl=x,
+        offset=offset,
+        inflation="logit",
+    ).fit(method="bfgs", maxiter=200, disp=0)
+
+    zinb_model = ZeroInflatedNegativeBinomialP(
+        endog=y,
+        exog=x,
+        exog_infl=x,
+        offset=offset,
+        inflation="logit",
+    ).fit(method="bfgs", maxiter=250, disp=0)
+
+    candidates = [
+        {"model": "Poisson", "fit": pois, "aic": pois.aic, "llf": pois.llf},
+        {"model": "Negative Binomial", "fit": nb, "aic": nb.aic, "llf": nb.llf},
+        {"model": "ZIP", "fit": zip_model, "aic": zip_model.aic, "llf": zip_model.llf},
+        {"model": "ZINB", "fit": zinb_model, "aic": zinb_model.aic, "llf": zinb_model.llf},
+    ]
+
+    metric, lower_is_better = metric_name_and_direction(candidates, preferred="AIC")
+    metric_key = "aic" if metric == "AIC" else "llf"
+    best = (
+        min(candidates, key=lambda r: r[metric_key])
+        if lower_is_better
+        else max(candidates, key=lambda r: r[metric_key])
+    )
+
+    freq_scores = pd.DataFrame(
+        {
+            "Model": [c["model"] for c in candidates],
+            "AIC": [c["aic"] for c in candidates],
+            "LogLik": [c["llf"] for c in candidates],
+        }
+    ).sort_values(by=metric, ascending=lower_is_better)
+
+    df["pred_freq_poisson"] = pois.predict(df, offset=offset)
+    df["pred_freq_negbin"] = nb.predict(df, offset=offset)
+    df["pred_freq_zip"] = zip_model.predict(exog=x, exog_infl=x, offset=offset, which="mean")
+    df["pred_freq_zinb"] = zinb_model.predict(exog=x, exog_infl=x, offset=offset, which="mean")
+
+    best_map = {
+        "Poisson": "pred_freq_poisson",
+        "Negative Binomial": "pred_freq_negbin",
+        "ZIP": "pred_freq_zip",
+        "ZINB": "pred_freq_zinb",
+    }
+    df["pred_freq_best"] = df[best_map[best["model"]]]
+    return best, freq_scores, metric, metric_key
+
+
+def fit_severity_models(df: pd.DataFrame, tail_quantile: float) -> tuple[dict, pd.DataFrame, str, str, dict]:
+    sev_df = df[df["ClaimAmount"] > 0].copy()
+    sev_formula = "ClaimAmount ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + log_density"
+
+    gamma_fit = glm(sev_formula, data=sev_df, family=Gamma()).fit()
+    ig_fit = glm(sev_formula, data=sev_df, family=InverseGaussian()).fit()
+    lognorm_fit = ols("np.log(ClaimAmount) ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + log_density", data=sev_df).fit()
+
+    threshold = sev_df["ClaimAmount"].quantile(tail_quantile)
+    sev_df["is_tail"] = (sev_df["ClaimAmount"] > threshold).astype(int)
+
+    body_df = sev_df[sev_df["ClaimAmount"] <= threshold].copy()
+    body_fit = glm(sev_formula, data=body_df, family=Gamma()).fit()
+    tail_prob_fit = glm(
+        "is_tail ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + log_density",
+        data=sev_df,
+        family=Binomial(),
+    ).fit()
+
+    excess = sev_df.loc[sev_df["is_tail"] == 1, "ClaimAmount"] - threshold
+    if len(excess) > 10 and float(excess.mean()) > 0:
+        gpd_shape, _, gpd_scale = genpareto.fit(excess, floc=0)
+        if gpd_shape >= 1:
+            gpd_shape = 0.95
+    else:
+        gpd_shape, gpd_scale = 0.2, max(float(excess.mean()), 1.0)
+
+    phi = float(body_fit.scale)
+    shape_body = 1.0 / max(phi, 1e-9)
+    mu_body = np.clip(body_fit.predict(sev_df), 1e-9, None)
+    scale_body = np.clip(mu_body * phi, 1e-9, None)
+    p_tail = np.clip(tail_prob_fit.predict(sev_df), 1e-8, 1 - 1e-8)
+    y = np.clip(sev_df["ClaimAmount"].to_numpy(), 1e-9, None)
+
+    logpdf_body = gamma_dist.logpdf(y, a=shape_body, scale=scale_body)
+    excess_y = np.clip(y - threshold, 0, None)
+    logpdf_tail = genpareto.logpdf(excess_y, c=gpd_shape, loc=0, scale=max(gpd_scale, 1e-9))
+
+    is_tail = y > threshold
+    comp_ll = np.where(
+        is_tail,
+        np.log(p_tail) + logpdf_tail,
+        np.log(1 - p_tail) + logpdf_body,
+    )
+    gp_llf = float(np.sum(comp_ll))
+
+    if gpd_shape < 1:
+        expected_excess = gpd_scale / (1 - gpd_shape)
+    else:
+        expected_excess = float(excess.mean()) if len(excess) > 0 else gpd_scale
+    expected_tail_mean = threshold + expected_excess
+
+    candidates = [
+        {"model": "Gamma GLM", "fit": gamma_fit, "aic": gamma_fit.aic, "llf": gamma_fit.llf},
+        {"model": "Inverse Gaussian GLM", "fit": ig_fit, "aic": ig_fit.aic, "llf": ig_fit.llf},
+        {"model": "Lognormal OLS", "fit": lognorm_fit, "aic": lognorm_fit.aic, "llf": lognorm_fit.llf},
+        {"model": "Gamma + Pareto Tail", "fit": None, "aic": np.nan, "llf": gp_llf},
+    ]
+
+    metric, lower_is_better = metric_name_and_direction(candidates, preferred="AIC")
+    metric_key = "aic" if metric == "AIC" else "llf"
+    best = (
+        min(candidates, key=lambda r: r[metric_key])
+        if lower_is_better
+        else max(candidates, key=lambda r: r[metric_key])
+    )
+
+    sev_scores = pd.DataFrame(
+        {
+            "Model": [c["model"] for c in candidates],
+            "AIC": [c["aic"] for c in candidates],
+            "LogLik": [c["llf"] for c in candidates],
+        }
+    ).sort_values(by=metric, ascending=lower_is_better)
+
+    df["pred_sev_gamma"] = np.clip(gamma_fit.predict(df), 1e-9, None)
+    df["pred_sev_invgauss"] = np.clip(ig_fit.predict(df), 1e-9, None)
+    df["pred_sev_lognorm"] = np.exp(lognorm_fit.predict(df) + 0.5 * lognorm_fit.mse_resid)
+    full_p_tail = np.clip(tail_prob_fit.predict(df), 1e-8, 1 - 1e-8)
+    df["pred_sev_gamma_pareto"] = np.clip(
+        (1 - full_p_tail) * np.clip(body_fit.predict(df), 1e-9, None) + full_p_tail * expected_tail_mean,
+        1e-9,
+        None,
+    )
+
+    best_map = {
+        "Gamma GLM": "pred_sev_gamma",
+        "Inverse Gaussian GLM": "pred_sev_invgauss",
+        "Lognormal OLS": "pred_sev_lognorm",
+        "Gamma + Pareto Tail": "pred_sev_gamma_pareto",
+    }
+    df["pred_sev_best"] = df[best_map[best["model"]]]
+
+    tail_info = {
+        "threshold": threshold,
+        "shape": gpd_shape,
+        "scale": gpd_scale,
+        "tail_count": int((sev_df["ClaimAmount"] > threshold).sum()),
+    }
+    return best, sev_scores, metric, metric_key, tail_info
+
+
 df = load_data()
+st.success(f"Dataset loaded. Records: {len(df):,}")
 
-st.success(f"Dataset Loaded | Records: {len(df)}")
+st.sidebar.header("Tail Settings")
+tail_quantile = st.sidebar.slider("Tail threshold quantile", 0.85, 0.99, 0.95, 0.01)
 
-# =====================================================
-# MODEL TRAINING
-st.header("1. Model Training")
+with st.spinner("Fitting frequency models (Poisson, NB, ZIP, ZINB)..."):
+    best_freq, freq_scores, freq_metric, _ = fit_frequency_models(df)
 
-freq_formula = "ClaimNb ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + np.log(Density)"
-sev_formula  = "ClaimAmount ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + np.log(Density)"
+with st.spinner("Fitting severity models (Gamma, InvGaussian, Lognormal, Gamma+Pareto)..."):
+    best_sev, sev_scores, sev_metric, _, tail_info = fit_severity_models(df, tail_quantile)
 
-st.write("Training Poisson frequency model...")
-freq_pois = glm(freq_formula, data=df, family=Poisson()).fit()
+df["pure_premium_best"] = df["pred_freq_best"] * df["pred_sev_best"]
 
-st.write("Training Negative Binomial frequency model...")
-freq_nb = glm(freq_formula, data=df, family=NegativeBinomial()).fit()
+st.header("1. Frequency Model Dashboard")
+col1, col2 = st.columns(2)
+with col1:
+    st.write(f"Common metric used: **{freq_metric}**")
+    st.write(f"Selected frequency model: **{best_freq['model']}**")
+with col2:
+    chosen_value = best_freq["aic"] if freq_metric == "AIC" else best_freq["llf"]
+    st.metric(f"Best {freq_metric}", f"{chosen_value:,.2f}")
 
-st.write("Training Zero-Inflated Poisson frequency model...")
-zip_exog = df[["VehPower", "VehAge", "DrivAge", "BonusMalus", "Density"]]
-zip_endog = df["ClaimNb"]
-freq_zip = ZeroInflatedPoisson(zip_endog, zip_exog, exog_infl=zip_exog, inflation="logit").fit(disp=0)
-freq_zinb = ZeroInflatedNegativeBinomial(zip_endog, zip_exog, exog_infl=zip_exog, inflation="logit").fit(disp=0)
+st.dataframe(freq_scores, use_container_width=True)
 
+st.header("2. Severity Model Dashboard")
+col3, col4 = st.columns(2)
+with col3:
+    st.write(f"Common metric used: **{sev_metric}**")
+    st.write(f"Selected severity model: **{best_sev['model']}**")
+with col4:
+    chosen_value = best_sev["aic"] if sev_metric == "AIC" else best_sev["llf"]
+    if np.isfinite(chosen_value):
+        st.metric(f"Best {sev_metric}", f"{chosen_value:,.2f}")
+    else:
+        st.metric(f"Best {sev_metric}", "N/A")
 
-st.write("Training Gamma severity model (ClaimNb > 0)...")
-sev_data = df[df["ClaimNb"] > 0].copy()
-sev = glm(sev_formula, data=sev_data, family=Gamma()).fit()
+st.dataframe(sev_scores, use_container_width=True)
 
-st.success("All models trained.")
+st.caption(
+    "Tail diagnostics (Gamma+Pareto): "
+    f"threshold={tail_info['threshold']:.2f}, "
+    f"tail claims={tail_info['tail_count']}, "
+    f"shape={tail_info['shape']:.3f}, scale={tail_info['scale']:.2f}"
+)
 
-# =====================================================
-# MODEL COMPARISON (Poisson vs NB vs ZIP)
-# =====================================================
-st.header("2. Model Comparison (Frequency)")
-
-col_aic1, col_aic2, col_aic3 = st.columns(3)
-with col_aic1:
-    st.metric("Poisson AIC", f"{freq_pois.aic:.1f}")
-with col_aic2:
-    st.metric("NegBin AIC", f"{freq_nb.aic:.1f}")
-with col_aic3:
-    st.metric("ZIP LogLik", f"{freq_zip.llf:.1f}")
-
-st.write("Lower AIC (or higher log-likelihood) indicates better fit. Use this to justify Poisson vs NB vs ZIP.")
-
-# =====================================================
-# PORTFOLIO PREDICTIONS
-# =====================================================
-st.header("3. Portfolio-Level Predictions")
-
-df["pred_freq_pois"] = freq_pois.predict(df)
-df["pred_freq_nb"] = freq_nb.predict(df)
-
-# For ZIP, need same exog structure
-df_zip_exog = df[["VehPower", "VehAge", "DrivAge", "BonusMalus", "Density"]]
-df["pred_freq_zip"] = freq_zip.predict(df_zip_exog)
-# For ZINB, would need to implement custom predict function to combine count and inflation parts
-df_zip_exog = df[["VehPower", "VehAge", "DrivAge", "BonusMalus", "Density"]]
-df["pred_freq_zip"] = freq_zinb.predict(df_zip_exog)
-
-df["pred_sev"] = sev.predict(df)
-df["pure_premium_pois"] = df["pred_freq_pois"] * df["pred_sev"]
-df["pure_premium_nb"] = df["pred_freq_nb"] * df["pred_sev"]
-df["pure_premium_zip"] = df["pred_freq_zip"] * df["pred_sev"]
-
-st.write(df[["pred_freq_pois", "pred_freq_nb", "pred_freq_zip", "pred_sev", "pure_premium_pois"]].head())
-
-# =====================================================
-# TERRITORIAL HEATMAP (BY REGION)
-# =====================================================
-st.header("4. Territorial Premium View (by Region)")
+st.header("3. Pure Premium (Best Frequency x Best Severity)")
+col5, col6, col7 = st.columns(3)
+with col5:
+    st.metric("Avg Pred Frequency", f"{df['pred_freq_best'].mean():.4f}")
+with col6:
+    st.metric("Avg Pred Severity", f"{df['pred_sev_best'].mean():.2f}")
+with col7:
+    st.metric("Avg Pure Premium", f"{df['pure_premium_best'].mean():.2f}")
 
 region_summary = (
-    df.groupby("Region")[["pure_premium_pois", "pure_premium_nb", "pure_premium_zip"]]
+    df.groupby("Region", as_index=False)["pure_premium_best"]
     .mean()
-    .reset_index()
+    .sort_values("pure_premium_best", ascending=False)
 )
 
-# =====================================================
-# 1️⃣ FREQUENCY MODEL — BASE MODEL
-# =====================================================
-
-st.header("1️⃣ Frequency Modeling (Base Poisson GLM)")
-
-base_freq_model = glm(
-    formula="ClaimNb ~ VehPower + VehAge + DrivAge + BonusMalus",
-    data=df,
-    family=Poisson(),
-    offset=np.log(df["Exposure"])
-).fit()
-
-df["Pred_Freq_Base"] = base_freq_model.predict(df, offset=np.log(df["Exposure"]))
-
-st.write("Base Model AIC:", round(base_freq_model.aic,2))
-
-# =====================================================
-# 2️⃣ TERRITORIAL FREQUENCY MODEL
-# =====================================================
-
-st.header("2️⃣ Frequency Modeling with Territory")
-
-territorial_freq_model = glm(
-    formula="ClaimNb ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + np.log(Density)",
-    data=df,
-    family=Poisson(),
-    offset=np.log(df["Exposure"])
-).fit()
-
-df["Pred_Freq_Terr"] = territorial_freq_model.predict(df, offset=np.log(df["Exposure"]))
-
-st.write("Territorial Model AIC:", round(territorial_freq_model.aic,2))
-
-if territorial_freq_model.aic < base_freq_model.aic:
-    st.success("Territorial variables improve model fit ✅")
-else:
-    st.warning("Territorial variables did not improve model fit ⚠️")
-
-# =====================================================
-# TERRITORIAL RELATIVITIES
-# =====================================================
-
-st.subheader("Territorial Risk Relativities")
-
-territory_freq = (
-    df.groupby("Region")["ClaimNb"].sum() /
-    df.groupby("Region")["Exposure"].sum()
-)
-
-st.bar_chart(territory_freq)
-
-# =====================================================
-# 3️⃣ SEVERITY MODEL
-# =====================================================
-
-st.header("3️⃣ Severity Modeling (Gamma GLM)")
-
-sev_df = df[df["ClaimAmount"] > 0].copy()
-
-base_sev_model = glm(
-    formula="ClaimAmount ~ VehPower + VehAge + DrivAge + BonusMalus",
-    data=sev_df,
-    family=Gamma()
-).fit()
-
-territorial_sev_model = glm(
-    formula="ClaimAmount ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region)",
-    data=sev_df,
-    family=Gamma()
-).fit()
-
-df["Pred_Sev"] = territorial_sev_model.predict(df)
-
-st.write("Severity AIC (Base):", round(base_sev_model.aic,2))
-st.write("Severity AIC (Territory):", round(territorial_sev_model.aic,2))
-aic_diff = base_sev_model.aic - territorial_sev_model.aic
-
-if aic_diff > 10:
-    st.success("Strong evidence territorial factors improve severity modeling.")
-
-
-# =====================================================
-# 4️⃣ PURE PREMIUM CALCULATION
-# =====================================================
-
-st.header("4️⃣ Pure Premium Calculation")
-
-df["Pure_Premium"] = df["Pred_Freq_Terr"] * df["Pred_Sev"]
-
-st.write("Average Pure Premium:", df["Pure_Premium"])
-
-fig = plt.figure(figsize=(10,5))
-plt.hist(df["Pure_Premium"], bins=50)
-plt.title("Pure Premium Distribution (Territorial Adjusted)")
+st.subheader("Average Pure Premium by Region")
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.bar(region_summary["Region"], region_summary["pure_premium_best"], color="steelblue")
+ax.set_ylabel("Average Pure Premium")
+ax.set_xlabel("Region")
+ax.set_title("Territorial Pure Premium - Best Models")
+ax.tick_params(axis="x", rotation=45)
 st.pyplot(fig)
 
-# =====================================================
-# 5️⃣ MACHINE LEARNING BENCHMARK
-# =====================================================
-
-st.header("5️⃣ Machine Learning Severity Benchmark")
-
-X = sev_df[["VehPower","VehAge","DrivAge","BonusMalus","Density"]]
-y = sev_df["ClaimAmount"]
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.3, random_state=42
-)
-
-rf = RandomForestRegressor()
-rf.fit(X_train, y_train)
-rf_pred = rf.predict(X_test)
-
-xgb = XGBRegressor()
-xgb.fit(X_train, y_train)
-xgb_pred = xgb.predict(X_test)
-
-st.write("Random Forest RMSE:", round(np.sqrt(mean_squared_error(y_test, rf_pred)),2))
-st.write("XGBoost RMSE:", round(np.sqrt(mean_squared_error(y_test, xgb_pred)),2))
-
-# =====================================================
-# 6️⃣ SHAP EXPLAINABILITY
-# =====================================================
-
-st.header("6️⃣ SHAP Feature Importance")
-
-explainer = shap.Explainer(rf)
-shap_values = explainer(X_test[:200])
-
-fig_shap = plt.figure(figsize=(10,5))
-shap.plots.bar(shap_values, show=False)
-st.pyplot(fig_shap)
-
-# =====================================================
-# 7️⃣ MONTE CARLO AGGREGATE LOSS SIMULATION
-# =====================================================
-
-st.header("7️⃣ Monte Carlo Aggregate Loss Simulation")
-
-n_sim = st.slider("Number of Simulations", 1000, 10000, 5000)
-
-sim_losses = []
-
-for _ in range(n_sim):
-    freq_sim = np.random.poisson(df["Pred_Freq_Terr"].mean())
-    sev_sim = np.random.gamma(shape=2, scale=df["Pred_Sev"].mean()/2)
-    sim_losses.append(freq_sim * sev_sim)
-
-var95 = np.percentile(sim_losses,95)
-var99 = np.percentile(sim_losses,99)
-
-st.write("VaR 95%:", round(var95,2))
-st.write("VaR 99%:", round(var99,2))
-
-fig2 = plt.figure(figsize=(10,5))
-plt.hist(sim_losses, bins=50)
-plt.title("Simulated Aggregate Loss Distribution")
-st.pyplot(fig2)
+st.subheader("Sample Portfolio Predictions")
+show_cols = [
+    "ClaimNb",
+    "ClaimAmount",
+    "pred_freq_best",
+    "pred_sev_best",
+    "pure_premium_best",
+]
+st.dataframe(df[show_cols].head(20), use_container_width=True)
