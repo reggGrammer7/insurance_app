@@ -58,104 +58,54 @@ def metric_name_and_direction(model_rows: list[dict], preferred: str = "AIC") ->
     return "AIC", True
 
 
-def stratified_sample(df: pd.DataFrame, max_rows: int, group_col: str, random_state: int = 42) -> pd.DataFrame:
-    if len(df) <= max_rows:
-        return df.copy()
-    base = (
-        df.groupby(group_col, group_keys=False)
-        .apply(lambda g: g.sample(n=1, random_state=random_state))
-        .reset_index(drop=True)
-    )
-    need = max_rows - len(base)
-    if need <= 0:
-        return base.copy()
-    remaining = df.drop(index=base.index, errors="ignore")
-    extra = remaining.sample(n=min(need, len(remaining)), random_state=random_state)
-    return pd.concat([base, extra], axis=0).sample(frac=1.0, random_state=random_state).reset_index(drop=True)
-
-
-@st.cache_data(show_spinner=False)
-def fit_frequency_models(
-    train_df: pd.DataFrame,
-    full_df: pd.DataFrame,
-    max_zi_rows: int,
-    include_zinb: bool,
-    zi_maxiter: int,
-) -> tuple[dict, pd.DataFrame, str, str, pd.DataFrame]:
+def fit_frequency_models(df: pd.DataFrame) -> tuple[dict, pd.DataFrame, str, str]:
     formula = "ClaimNb ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + log_density"
-    train_offset = train_df["log_exposure"].astype(float)
-    full_offset = full_df["log_exposure"].astype(float)
+    offset = df["log_exposure"].astype(float)
 
-    pois = glm(formula=formula, data=train_df, family=Poisson(), offset=train_offset).fit()
-    nb = glm(formula=formula, data=train_df, family=NegativeBinomial(), offset=train_offset).fit()
+    pois = glm(formula=formula, data=df, family=Poisson(), offset=offset).fit()
+    nb = glm(formula=formula, data=df, family=NegativeBinomial(), offset=offset).fit()
 
-    zi_df = stratified_sample(train_df, max_zi_rows, "Region", random_state=42)
-    x_train = pd.get_dummies(
-        zi_df[["VehPower", "VehAge", "DrivAge", "BonusMalus", "log_density", "Region"]],
+    x = pd.get_dummies(
+        df[["VehPower", "VehAge", "DrivAge", "BonusMalus", "log_density", "Region"]],
         columns=["Region"],
         drop_first=True,
         dtype=float,
     )
-    x_train = add_constant(x_train, has_constant="add").astype(float)
-    y_train = zi_df["ClaimNb"].astype(int)
-    train_zi_offset = zi_df["log_exposure"].astype(float)
-    x_train_np = np.asarray(x_train, dtype=float)
-    y_train_np = np.asarray(y_train, dtype=np.int64)
-    train_zi_offset_np = np.asarray(train_zi_offset, dtype=float)
+    x = add_constant(x, has_constant="add").astype(float)
+    y = df["ClaimNb"].astype(int)
+    x_np = np.asarray(x, dtype=float)
+    y_np = np.asarray(y, dtype=np.int64)
+    offset_np = np.asarray(offset, dtype=float)
 
     zip_model = ZeroInflatedPoisson(
-        endog=y_train_np,
-        exog=x_train_np,
-        exog_infl=x_train_np,
-        offset=train_zi_offset_np,
+        endog=y_np,
+        exog=x_np,
+        exog_infl=x_np,
+        offset=offset_np,
         inflation="logit",
-    ).fit(method="bfgs", maxiter=zi_maxiter, disp=0)
+    ).fit(method="bfgs", maxiter=200, disp=0)
 
-    zinb_model = None
-    zinb_aic = np.nan
-    zinb_llf = np.nan
-    if include_zinb:
-        zinb_model = ZeroInflatedNegativeBinomialP(
-            endog=y_train_np,
-            exog=x_train_np,
-            exog_infl=x_train_np,
-            offset=train_zi_offset_np,
-            inflation="logit",
-        ).fit(method="bfgs", maxiter=zi_maxiter, disp=0)
-        zinb_aic = zinb_model.aic
-        zinb_llf = zinb_model.llf
-
-    x_full = pd.get_dummies(
-        full_df[["VehPower", "VehAge", "DrivAge", "BonusMalus", "log_density", "Region"]],
-        columns=["Region"],
-        drop_first=True,
-        dtype=float,
-    )
-    x_full = add_constant(x_full, has_constant="add").astype(float)
-    x_full = x_full.reindex(columns=x_train.columns, fill_value=0.0)
-    x_full_np = np.asarray(x_full, dtype=float)
-    full_offset_np = np.asarray(full_offset, dtype=float)
+    zinb_model = ZeroInflatedNegativeBinomialP(
+        endog=y_np,
+        exog=x_np,
+        exog_infl=x_np,
+        offset=offset_np,
+        inflation="logit",
+    ).fit(method="bfgs", maxiter=250, disp=0)
 
     candidates = [
         {"model": "Poisson", "fit": pois, "aic": pois.aic, "llf": pois.llf},
         {"model": "Negative Binomial", "fit": nb, "aic": nb.aic, "llf": nb.llf},
         {"model": "ZIP", "fit": zip_model, "aic": zip_model.aic, "llf": zip_model.llf},
+        {"model": "ZINB", "fit": zinb_model, "aic": zinb_model.aic, "llf": zinb_model.llf},
     ]
-    if include_zinb:
-        candidates.append({"model": "ZINB", "fit": zinb_model, "aic": zinb_aic, "llf": zinb_llf})
 
-    scored = [c for c in candidates if np.isfinite(c["aic"]) and np.isfinite(c["llf"])]
-    if not scored:
-        scored = [c for c in candidates if np.isfinite(c["llf"])]
-    if not scored:
-        scored = candidates
-
-    metric, lower_is_better = metric_name_and_direction(scored, preferred="AIC")
+    metric, lower_is_better = metric_name_and_direction(candidates, preferred="AIC")
     metric_key = "aic" if metric == "AIC" else "llf"
     best = (
-        min(scored, key=lambda r: r[metric_key])
+        min(candidates, key=lambda r: r[metric_key])
         if lower_is_better
-        else max(scored, key=lambda r: r[metric_key])
+        else max(candidates, key=lambda r: r[metric_key])
     )
 
     freq_scores = pd.DataFrame(
@@ -166,14 +116,10 @@ def fit_frequency_models(
         }
     ).sort_values(by=metric, ascending=lower_is_better)
 
-    pred_df = full_df.copy()
-    pred_df["pred_freq_poisson"] = pois.predict(full_df, offset=full_offset)
-    pred_df["pred_freq_negbin"] = nb.predict(full_df, offset=full_offset)
-    pred_df["pred_freq_zip"] = zip_model.predict(exog=x_full_np, exog_infl=x_full_np, offset=full_offset_np, which="mean")
-    if include_zinb and zinb_model is not None:
-        pred_df["pred_freq_zinb"] = zinb_model.predict(exog=x_full_np, exog_infl=x_full_np, offset=full_offset_np, which="mean")
-    else:
-        pred_df["pred_freq_zinb"] = np.nan
+    df["pred_freq_poisson"] = pois.predict(df, offset=offset)
+    df["pred_freq_negbin"] = nb.predict(df, offset=offset)
+    df["pred_freq_zip"] = zip_model.predict(exog=x_np, exog_infl=x_np, offset=offset_np, which="mean")
+    df["pred_freq_zinb"] = zinb_model.predict(exog=x_np, exog_infl=x_np, offset=offset_np, which="mean")
 
     best_map = {
         "Poisson": "pred_freq_poisson",
@@ -181,17 +127,12 @@ def fit_frequency_models(
         "ZIP": "pred_freq_zip",
         "ZINB": "pred_freq_zinb",
     }
-    pred_df["pred_freq_best"] = pred_df[best_map[best["model"]]]
-    return best, freq_scores, metric, metric_key, pred_df
+    df["pred_freq_best"] = df[best_map[best["model"]]]
+    return best, freq_scores, metric, metric_key
 
 
-@st.cache_data(show_spinner=False)
-def fit_severity_models(
-    train_df: pd.DataFrame,
-    full_df: pd.DataFrame,
-    tail_quantile: float,
-) -> tuple[dict, pd.DataFrame, str, str, dict, pd.DataFrame]:
-    sev_df = train_df[train_df["ClaimAmount"] > 0].copy()
+def fit_severity_models(df: pd.DataFrame, tail_quantile: float) -> tuple[dict, pd.DataFrame, str, str, dict]:
+    sev_df = df[df["ClaimAmount"] > 0].copy()
     sev_formula = "ClaimAmount ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + log_density"
 
     gamma_fit = glm(sev_formula, data=sev_df, family=Gamma()).fit()
@@ -249,15 +190,12 @@ def fit_severity_models(
         {"model": "Gamma + Pareto Tail", "fit": None, "aic": np.nan, "llf": gp_llf},
     ]
 
-    scored = [c for c in candidates if np.isfinite(c["aic"]) and np.isfinite(c["llf"])]
-    if not scored:
-        scored = [c for c in candidates if np.isfinite(c["llf"])]
-    metric, lower_is_better = metric_name_and_direction(scored, preferred="AIC")
+    metric, lower_is_better = metric_name_and_direction(candidates, preferred="AIC")
     metric_key = "aic" if metric == "AIC" else "llf"
     best = (
-        min(scored, key=lambda r: r[metric_key])
+        min(candidates, key=lambda r: r[metric_key])
         if lower_is_better
-        else max(scored, key=lambda r: r[metric_key])
+        else max(candidates, key=lambda r: r[metric_key])
     )
 
     sev_scores = pd.DataFrame(
@@ -268,13 +206,12 @@ def fit_severity_models(
         }
     ).sort_values(by=metric, ascending=lower_is_better)
 
-    pred_df = full_df.copy()
-    pred_df["pred_sev_gamma"] = np.clip(gamma_fit.predict(full_df), 1e-9, None)
-    pred_df["pred_sev_invgauss"] = np.clip(ig_fit.predict(full_df), 1e-9, None)
-    pred_df["pred_sev_lognorm"] = np.exp(lognorm_fit.predict(full_df) + 0.5 * lognorm_fit.mse_resid)
-    full_p_tail = np.clip(tail_prob_fit.predict(full_df), 1e-8, 1 - 1e-8)
-    pred_df["pred_sev_gamma_pareto"] = np.clip(
-        (1 - full_p_tail) * np.clip(body_fit.predict(full_df), 1e-9, None) + full_p_tail * expected_tail_mean,
+    df["pred_sev_gamma"] = np.clip(gamma_fit.predict(df), 1e-9, None)
+    df["pred_sev_invgauss"] = np.clip(ig_fit.predict(df), 1e-9, None)
+    df["pred_sev_lognorm"] = np.exp(lognorm_fit.predict(df) + 0.5 * lognorm_fit.mse_resid)
+    full_p_tail = np.clip(tail_prob_fit.predict(df), 1e-8, 1 - 1e-8)
+    df["pred_sev_gamma_pareto"] = np.clip(
+        (1 - full_p_tail) * np.clip(body_fit.predict(df), 1e-9, None) + full_p_tail * expected_tail_mean,
         1e-9,
         None,
     )
@@ -285,7 +222,7 @@ def fit_severity_models(
         "Lognormal OLS": "pred_sev_lognorm",
         "Gamma + Pareto Tail": "pred_sev_gamma_pareto",
     }
-    pred_df["pred_sev_best"] = pred_df[best_map[best["model"]]]
+    df["pred_sev_best"] = df[best_map[best["model"]]]
 
     tail_info = {
         "threshold": threshold,
@@ -293,43 +230,21 @@ def fit_severity_models(
         "scale": gpd_scale,
         "tail_count": int((sev_df["ClaimAmount"] > threshold).sum()),
     }
-    return best, sev_scores, metric, metric_key, tail_info, pred_df
+    return best, sev_scores, metric, metric_key, tail_info
 
 
 df = load_data()
 st.success(f"Dataset loaded. Records: {len(df):,}")
 
-st.sidebar.header("Performance Settings")
-fast_mode = st.sidebar.checkbox("Fast mode (recommended)", value=True)
-max_train_rows = st.sidebar.slider("Max training rows", 30000, 300000, 120000, 10000)
-max_zi_rows = st.sidebar.slider("Max ZIP/ZINB rows", 10000, 120000, 35000, 5000)
-include_zinb = st.sidebar.checkbox("Fit ZINB", value=not fast_mode)
-zi_maxiter = st.sidebar.slider("ZIP/ZINB max iterations", 30, 200, 60 if fast_mode else 120, 10)
-
 st.sidebar.header("Tail Settings")
 tail_quantile = st.sidebar.slider("Tail threshold quantile", 0.85, 0.99, 0.95, 0.01)
 
-train_df = stratified_sample(df, max_train_rows if fast_mode else len(df), "Region", random_state=42)
-st.caption(
-    f"Training sample: {len(train_df):,} rows (full data: {len(df):,}). "
-    f"ZIP/ZINB capped at {min(max_zi_rows, len(train_df)):,} rows."
-)
-
 with st.spinner("Fitting frequency models (Poisson, NB, ZIP, ZINB)..."):
-    best_freq, freq_scores, freq_metric, _, freq_pred_df = fit_frequency_models(
-        train_df=train_df,
-        full_df=df,
-        max_zi_rows=max_zi_rows if fast_mode else len(train_df),
-        include_zinb=include_zinb,
-        zi_maxiter=zi_maxiter,
-    )
+    best_freq, freq_scores, freq_metric, _ = fit_frequency_models(df)
 
 with st.spinner("Fitting severity models (Gamma, InvGaussian, Lognormal, Gamma+Pareto)..."):
-    best_sev, sev_scores, sev_metric, _, tail_info, sev_pred_df = fit_severity_models(train_df, df, tail_quantile)
+    best_sev, sev_scores, sev_metric, _, tail_info = fit_severity_models(df, tail_quantile)
 
-df = df.copy()
-df["pred_freq_best"] = freq_pred_df["pred_freq_best"].to_numpy()
-df["pred_sev_best"] = sev_pred_df["pred_sev_best"].to_numpy()
 df["pure_premium_best"] = df["pred_freq_best"] * df["pred_sev_best"]
 
 st.header("1. Frequency Model Dashboard")
