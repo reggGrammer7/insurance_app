@@ -134,7 +134,7 @@ st.header("4️⃣ Pure Premium Calculation")
 
 df["Pure_Premium"] = df["Pred_Freq_Terr"] * df["Pred_Sev"]
 
-st.write("Average Pure Premium:", round(df["Pure_Premium"].mean(),2))
+st.write("Average Pure Premium:", df["Pure_Premium"])
 
 fig = plt.figure(figsize=(10,5))
 plt.hist(df["Pure_Premium"], bins=50)
