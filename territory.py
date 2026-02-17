@@ -120,6 +120,11 @@ df["Pred_Sev"] = territorial_sev_model.predict(df)
 
 st.write("Severity AIC (Base):", round(base_sev_model.aic,2))
 st.write("Severity AIC (Territory):", round(territorial_sev_model.aic,2))
+aic_diff = base_sev_model.aic - territorial_sev_model.aic
+
+if aic_diff > 10:
+    st.success("Strong evidence territorial factors improve severity modeling.")
+
 
 # =====================================================
 # 4️⃣ PURE PREMIUM CALCULATION
