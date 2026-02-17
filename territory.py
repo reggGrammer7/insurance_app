@@ -14,6 +14,7 @@ from statsmodels.discrete.count_model import (
 )
 from statsmodels.formula.api import glm, ols
 from statsmodels.genmod.families import Binomial, Gamma, InverseGaussian, NegativeBinomial, Poisson
+from statsmodels.genmod.families.links import Log
 
 warnings.filterwarnings("ignore")
 
@@ -195,7 +196,16 @@ def fit_severity_models(
     sev_formula = "ClaimAmount ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + log_density"
 
     gamma_fit = glm(sev_formula, data=sev_df, family=Gamma()).fit()
-    ig_fit = glm(sev_formula, data=sev_df, family=InverseGaussian()).fit()
+    ig_fit = None
+    ig_aic = np.nan
+    ig_llf = np.nan
+    ig_failed = False
+    try:
+        ig_fit = glm(sev_formula, data=sev_df, family=InverseGaussian(link=Log())).fit()
+        ig_aic = ig_fit.aic
+        ig_llf = ig_fit.llf
+    except Exception:
+        ig_failed = True
     lognorm_fit = ols("np.log(ClaimAmount) ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + log_density", data=sev_df).fit()
 
     threshold = sev_df["ClaimAmount"].quantile(tail_quantile)
@@ -244,7 +254,7 @@ def fit_severity_models(
 
     candidates = [
         {"model": "Gamma GLM", "fit": gamma_fit, "aic": gamma_fit.aic, "llf": gamma_fit.llf},
-        {"model": "Inverse Gaussian GLM", "fit": ig_fit, "aic": ig_fit.aic, "llf": ig_fit.llf},
+        {"model": "Inverse Gaussian GLM", "fit": ig_fit, "aic": ig_aic, "llf": ig_llf},
         {"model": "Lognormal OLS", "fit": lognorm_fit, "aic": lognorm_fit.aic, "llf": lognorm_fit.llf},
         {"model": "Gamma + Pareto Tail", "fit": None, "aic": np.nan, "llf": gp_llf},
     ]
@@ -270,7 +280,10 @@ def fit_severity_models(
 
     pred_df = full_df.copy()
     pred_df["pred_sev_gamma"] = np.clip(gamma_fit.predict(full_df), 1e-9, None)
-    pred_df["pred_sev_invgauss"] = np.clip(ig_fit.predict(full_df), 1e-9, None)
+    if ig_fit is not None:
+        pred_df["pred_sev_invgauss"] = np.clip(ig_fit.predict(full_df), 1e-9, None)
+    else:
+        pred_df["pred_sev_invgauss"] = np.nan
     pred_df["pred_sev_lognorm"] = np.exp(lognorm_fit.predict(full_df) + 0.5 * lognorm_fit.mse_resid)
     full_p_tail = np.clip(tail_prob_fit.predict(full_df), 1e-8, 1 - 1e-8)
     pred_df["pred_sev_gamma_pareto"] = np.clip(
@@ -292,6 +305,7 @@ def fit_severity_models(
         "shape": gpd_shape,
         "scale": gpd_scale,
         "tail_count": int((sev_df["ClaimAmount"] > threshold).sum()),
+        "ig_failed": ig_failed,
     }
     return best, sev_scores, metric, metric_key, tail_info, pred_df
 
@@ -356,6 +370,9 @@ with col4:
         st.metric(f"Best {sev_metric}", "N/A")
 
 st.dataframe(sev_scores, use_container_width=True)
+
+if tail_info.get("ig_failed", False):
+    st.warning("Inverse Gaussian severity fit was numerically unstable and excluded from model selection.")
 
 st.caption(
     "Tail diagnostics (Gamma+Pareto): "
