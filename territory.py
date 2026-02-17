@@ -8,6 +8,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 from sklearn.ensemble import RandomForestRegressor
 from xgboost import XGBRegressor
+from statsmodels.genmod.families import Poisson, Gamma, NegativeBinomial
+from statsmodels.discrete.count_model import ZeroInflatedPoisson
 from sklearn.datasets import fetch_openml
 import shap
 
@@ -43,6 +45,75 @@ def load_data():
 df = load_data()
 
 st.success(f"Dataset Loaded | Records: {len(df)}")
+
+# =====================================================
+# MODEL TRAINING
+st.header("1. Model Training")
+
+freq_formula = "ClaimNb ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + np.log(Density)"
+sev_formula  = "ClaimAmount ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + np.log(Density)"
+
+st.write("Training Poisson frequency model...")
+freq_pois = glm(freq_formula, data=df, family=Poisson()).fit()
+
+st.write("Training Negative Binomial frequency model...")
+freq_nb = glm(freq_formula, data=df, family=NegativeBinomial()).fit()
+
+st.write("Training Zero-Inflated Poisson frequency model...")
+zip_exog = df[["VehPower", "VehAge", "DrivAge", "BonusMalus", "Density"]]
+zip_endog = df["ClaimNb"]
+freq_zip = ZeroInflatedPoisson(zip_endog, zip_exog, exog_infl=zip_exog, inflation="logit").fit(disp=0)
+
+st.write("Training Gamma severity model (ClaimNb > 0)...")
+sev_data = df[df["ClaimNb"] > 0].copy()
+sev = glm(sev_formula, data=sev_data, family=Gamma()).fit()
+
+st.success("All models trained.")
+
+# =====================================================
+# MODEL COMPARISON (Poisson vs NB vs ZIP)
+# =====================================================
+st.header("2. Model Comparison (Frequency)")
+
+col_aic1, col_aic2, col_aic3 = st.columns(3)
+with col_aic1:
+    st.metric("Poisson AIC", f"{freq_pois.aic:.1f}")
+with col_aic2:
+    st.metric("NegBin AIC", f"{freq_nb.aic:.1f}")
+with col_aic3:
+    st.metric("ZIP LogLik", f"{freq_zip.llf:.1f}")
+
+st.write("Lower AIC (or higher log-likelihood) indicates better fit. Use this to justify Poisson vs NB vs ZIP.")
+
+# =====================================================
+# PORTFOLIO PREDICTIONS
+# =====================================================
+st.header("3. Portfolio-Level Predictions")
+
+df["pred_freq_pois"] = freq_pois.predict(df)
+df["pred_freq_nb"] = freq_nb.predict(df)
+
+# For ZIP, need same exog structure
+df_zip_exog = df[["VehPower", "VehAge", "DrivAge", "BonusMalus", "Density"]]
+df["pred_freq_zip"] = freq_zip.predict(df_zip_exog)
+
+df["pred_sev"] = sev.predict(df)
+df["pure_premium_pois"] = df["pred_freq_pois"] * df["pred_sev"]
+df["pure_premium_nb"] = df["pred_freq_nb"] * df["pred_sev"]
+df["pure_premium_zip"] = df["pred_freq_zip"] * df["pred_sev"]
+
+st.write(df[["pred_freq_pois", "pred_freq_nb", "pred_freq_zip", "pred_sev", "pure_premium_pois"]].head())
+
+# =====================================================
+# TERRITORIAL HEATMAP (BY REGION)
+# =====================================================
+st.header("4. Territorial Premium View (by Region)")
+
+region_summary = (
+    df.groupby("Region")[["pure_premium_pois", "pure_premium_nb", "pure_premium_zip"]]
+    .mean()
+    .reset_index()
+)
 
 # =====================================================
 # 1️⃣ FREQUENCY MODEL — BASE MODEL
