@@ -76,7 +76,7 @@ with col_aic1:
 with col_aic2:
     st.metric("NegBin AIC", f"{freq_nb.aic:.1f}")
 with col_aic3:
-    st.metric("ZIP LogLik", f"{freq_zip.llf:.1f}")
+    st.metric("ZIP AIC", f"{freq_zip.aic:.1f}")
 
 st.write("Lower AIC (or higher log-likelihood) indicates better fit. Use this to justify Poisson vs NB vs ZIP.")
 
