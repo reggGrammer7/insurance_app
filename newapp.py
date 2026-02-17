@@ -45,8 +45,8 @@ df = load_data()
 # =====================================================
 st.header("1. Model Training")
 
-freq_formula = "ClaimNb ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + np.log(Density)"
-sev_formula  = "ClaimAmount ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + np.log(Density)"
+freq_formula = "ClaimNb ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region)"
+sev_formula  = "ClaimAmount ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region)"
 
 st.write("Training Poisson frequency model...")
 freq_pois = glm(freq_formula, data=df, family=Poisson()).fit()
@@ -55,7 +55,7 @@ st.write("Training Negative Binomial frequency model...")
 freq_nb = glm(freq_formula, data=df, family=NegativeBinomial()).fit()
 
 st.write("Training Zero-Inflated Poisson frequency model...")
-zip_exog = df[["VehPower", "VehAge", "DrivAge", "BonusMalus", "Density"]]
+zip_exog = df[["VehPower", "VehAge", "DrivAge", "BonusMalus"]]
 zip_endog = df["ClaimNb"]
 freq_zip = ZeroInflatedPoisson(zip_endog, zip_exog, exog_infl=zip_exog, inflation="logit").fit(disp=0)
 
@@ -89,7 +89,7 @@ df["pred_freq_pois"] = freq_pois.predict(df)
 df["pred_freq_nb"] = freq_nb.predict(df)
 
 # For ZIP, need same exog structure
-df_zip_exog = df[["VehPower", "VehAge", "DrivAge", "BonusMalus", "Density"]]
+df_zip_exog = df[["VehPower", "VehAge", "DrivAge", "BonusMalus"]]
 df["pred_freq_zip"] = freq_zip.predict(df_zip_exog)
 
 df["pred_sev"] = sev.predict(df)
