@@ -60,7 +60,7 @@ def metric_name_and_direction(model_rows: list[dict], preferred: str = "AIC") ->
 
 def fit_frequency_models(df: pd.DataFrame) -> tuple[dict, pd.DataFrame, str, str]:
     formula = "ClaimNb ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region) + log_density"
-    offset = df["log_exposure"]
+    offset = df["log_exposure"].astype(float)
 
     pois = glm(formula=formula, data=df, family=Poisson(), offset=offset).fit()
     nb = glm(formula=formula, data=df, family=NegativeBinomial(), offset=offset).fit()
@@ -69,23 +69,27 @@ def fit_frequency_models(df: pd.DataFrame) -> tuple[dict, pd.DataFrame, str, str
         df[["VehPower", "VehAge", "DrivAge", "BonusMalus", "log_density", "Region"]],
         columns=["Region"],
         drop_first=True,
+        dtype=float,
     )
-    x = add_constant(x, has_constant="add")
+    x = add_constant(x, has_constant="add").astype(float)
     y = df["ClaimNb"].astype(int)
+    x_np = np.asarray(x, dtype=float)
+    y_np = np.asarray(y, dtype=np.int64)
+    offset_np = np.asarray(offset, dtype=float)
 
     zip_model = ZeroInflatedPoisson(
-        endog=y,
-        exog=x,
-        exog_infl=x,
-        offset=offset,
+        endog=y_np,
+        exog=x_np,
+        exog_infl=x_np,
+        offset=offset_np,
         inflation="logit",
     ).fit(method="bfgs", maxiter=200, disp=0)
 
     zinb_model = ZeroInflatedNegativeBinomialP(
-        endog=y,
-        exog=x,
-        exog_infl=x,
-        offset=offset,
+        endog=y_np,
+        exog=x_np,
+        exog_infl=x_np,
+        offset=offset_np,
         inflation="logit",
     ).fit(method="bfgs", maxiter=250, disp=0)
 
@@ -114,8 +118,8 @@ def fit_frequency_models(df: pd.DataFrame) -> tuple[dict, pd.DataFrame, str, str
 
     df["pred_freq_poisson"] = pois.predict(df, offset=offset)
     df["pred_freq_negbin"] = nb.predict(df, offset=offset)
-    df["pred_freq_zip"] = zip_model.predict(exog=x, exog_infl=x, offset=offset, which="mean")
-    df["pred_freq_zinb"] = zinb_model.predict(exog=x, exog_infl=x, offset=offset, which="mean")
+    df["pred_freq_zip"] = zip_model.predict(exog=x_np, exog_infl=x_np, offset=offset_np, which="mean")
+    df["pred_freq_zinb"] = zinb_model.predict(exog=x_np, exog_infl=x_np, offset=offset_np, which="mean")
 
     best_map = {
         "Poisson": "pred_freq_poisson",
