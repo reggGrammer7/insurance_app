@@ -11,7 +11,7 @@ from statsmodels.discrete.count_model import ZeroInflatedPoisson
 from statsmodels.formula.api import glm
 from statsmodels.genmod.families import Binomial, Gamma, NegativeBinomial, Poisson
 
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore") 
 
 st.set_page_config(layout="wide")
 st.title("Frequency (ZIP/Poisson/NB) + Severity (Gamma/Gamma-Pareto)")
