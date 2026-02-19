@@ -65,7 +65,7 @@ freq_model = glm(
 
 df["Pred_Freq"] = freq_model.predict(df, offset=np.log(df["Exposure"]))
 
-st.write("Average Predicted Frequency:", round(df["Pred_Freq"].mean(),4))
+st.write("Average Predicted Frequency:", df["Pred_Freq"])
 
 fig1 = plt.figure(figsize=(12,6))
 plt.hist(df["Pred_Freq"], bins=50)
