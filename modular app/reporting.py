@@ -1,3 +1,0 @@
-def generate_report(metrics_dict):
-    ...
-    return buffer
