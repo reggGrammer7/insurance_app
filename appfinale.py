@@ -7,18 +7,12 @@ from sklearn.datasets import fetch_openml
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.model_selection import train_test_split
-from statsmodels.formula.api import glm
-from statsmodels.genmod.families import Gamma, Poisson
+from statsmodels.formula.api import glm, ols
+from statsmodels.genmod.families import Gamma, NegativeBinomial, Poisson
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
-
-try:
-    from xgboost import XGBRegressor
-    XGB_AVAILABLE = True
-except Exception:
-    XGB_AVAILABLE = False
 
 try:
     import shap
@@ -113,100 +107,129 @@ train_idx, test_idx = train_test_split(df.index, test_size=0.3, random_state=42)
 train_df = df.loc[train_idx].copy()
 test_df = df.loc[test_idx].copy()
 
-# Frequency models
-freq_glm = glm(
+# Frequency models: Poisson vs Negative Binomial
+freq_poisson = glm(
     formula="ClaimNb ~ VehPower + VehAge + DrivAge + BonusMalus",
     data=train_df,
     family=Poisson(),
     offset=np.log(train_df["Exposure"])
 ).fit()
 
-freq_glm_test_count = freq_glm.predict(test_df, offset=np.log(test_df["Exposure"]))
-freq_glm_test_annual = freq_glm_test_count / test_df["Exposure"]
+freq_nb = glm(
+    formula="ClaimNb ~ VehPower + VehAge + DrivAge + BonusMalus",
+    data=train_df,
+    family=NegativeBinomial(),
+    offset=np.log(train_df["Exposure"])
+).fit()
 
-rf_freq = RandomForestRegressor(
-    n_estimators=200, max_depth=10, random_state=42, n_jobs=-1
-)
-rf_freq.fit(train_df[features], train_df["Observed_Freq"])
-rf_freq_test_annual = np.clip(rf_freq.predict(test_df[features]), 0, None)
+freq_poisson_test_count = freq_poisson.predict(test_df, offset=np.log(test_df["Exposure"]))
+freq_poisson_test_annual = np.clip(freq_poisson_test_count / test_df["Exposure"], 0, None)
+freq_nb_test_count = freq_nb.predict(test_df, offset=np.log(test_df["Exposure"]))
+freq_nb_test_annual = np.clip(freq_nb_test_count / test_df["Exposure"], 0, None)
 
 freq_results = pd.DataFrame(
     [
         {
             "Model": "Poisson GLM",
-            "RMSE": rmse(test_df["Observed_Freq"], freq_glm_test_annual),
-            "MAE": float(mean_absolute_error(test_df["Observed_Freq"], freq_glm_test_annual)),
+            "RMSE": rmse(test_df["Observed_Freq"], freq_poisson_test_annual),
+            "MAE": float(mean_absolute_error(test_df["Observed_Freq"], freq_poisson_test_annual)),
         },
         {
-            "Model": "Random Forest",
-            "RMSE": rmse(test_df["Observed_Freq"], rf_freq_test_annual),
-            "MAE": float(mean_absolute_error(test_df["Observed_Freq"], rf_freq_test_annual)),
+            "Model": "Negative Binomial GLM",
+            "RMSE": rmse(test_df["Observed_Freq"], freq_nb_test_annual),
+            "MAE": float(mean_absolute_error(test_df["Observed_Freq"], freq_nb_test_annual)),
         },
     ]
 ).sort_values("RMSE")
 
 best_freq_model_name = freq_results.iloc[0]["Model"]
 if best_freq_model_name == "Poisson GLM":
-    df["Pred_Freq_Annual"] = freq_glm.predict(df, offset=np.log(df["Exposure"])) / df["Exposure"]
+    df["Pred_Freq_Annual"] = np.clip(
+        freq_poisson.predict(df, offset=np.log(df["Exposure"])) / df["Exposure"], 0, None
+    )
 else:
-    df["Pred_Freq_Annual"] = np.clip(rf_freq.predict(df[features]), 0, None)
+    df["Pred_Freq_Annual"] = np.clip(
+        freq_nb.predict(df, offset=np.log(df["Exposure"])) / df["Exposure"], 0, None
+    )
 df["Pred_Claim_Count"] = df["Pred_Freq_Annual"] * df["Exposure"]
 
-# Severity models (only positive claims)
+# Severity models: Gamma vs Lognormal vs Gamma-Pareto
 sev_full = df[df["ClaimAmount"] > 0].copy()
 sev_train = sev_full.loc[sev_full.index.intersection(train_idx)].copy()
 sev_test = sev_full.loc[sev_full.index.intersection(test_idx)].copy()
 
-sev_glm = glm(
+sev_gamma = glm(
     formula="ClaimAmount ~ VehPower + VehAge + DrivAge + BonusMalus",
     data=sev_train,
     family=Gamma()
 ).fit()
-sev_glm_pred = np.clip(sev_glm.predict(sev_test), 0, None)
+sev_gamma_pred = np.clip(sev_gamma.predict(sev_test), 0, None)
 
-rf_sev = RandomForestRegressor(
-    n_estimators=300, max_depth=12, random_state=42, n_jobs=-1
+sev_lognorm = ols(
+    formula="np.log(ClaimAmount) ~ VehPower + VehAge + DrivAge + BonusMalus",
+    data=sev_train
+).fit()
+log_sigma2 = float(sev_lognorm.mse_resid)
+sev_lognorm_pred = np.clip(
+    np.exp(sev_lognorm.predict(sev_test) + 0.5 * log_sigma2), 0, None
 )
-rf_sev.fit(sev_train[features], sev_train["ClaimAmount"])
-rf_sev_pred = np.clip(rf_sev.predict(sev_test[features]), 0, None)
+
+tail_threshold = float(sev_train["ClaimAmount"].quantile(0.90))
+tail_train = sev_train.loc[sev_train["ClaimAmount"] >= tail_threshold, "ClaimAmount"].values
+if len(tail_train) >= 30 and tail_threshold > 0:
+    alpha = float(len(tail_train) / np.sum(np.log(tail_train / tail_threshold)))
+    alpha = max(alpha, 1.01)
+    pareto_tail_mean = float(alpha * tail_threshold / (alpha - 1))
+else:
+    pareto_tail_mean = float(np.percentile(sev_train["ClaimAmount"], 95))
+
+# Smooth blend: gamma body + pareto tail
+tail_scale = max(0.10 * tail_threshold, 1.0)
+tail_weight_test = 1.0 / (1.0 + np.exp(-(sev_gamma_pred - tail_threshold) / tail_scale))
+sev_gp_pred = np.clip(
+    (1.0 - tail_weight_test) * sev_gamma_pred + tail_weight_test * pareto_tail_mean,
+    0,
+    None,
+)
 
 sev_models = [
     {
         "Model": "Gamma GLM",
-        "RMSE": rmse(sev_test["ClaimAmount"], sev_glm_pred),
-        "MAE": float(mean_absolute_error(sev_test["ClaimAmount"], sev_glm_pred)),
+        "RMSE": rmse(sev_test["ClaimAmount"], sev_gamma_pred),
+        "MAE": float(mean_absolute_error(sev_test["ClaimAmount"], sev_gamma_pred)),
     },
     {
-        "Model": "Random Forest",
-        "RMSE": rmse(sev_test["ClaimAmount"], rf_sev_pred),
-        "MAE": float(mean_absolute_error(sev_test["ClaimAmount"], rf_sev_pred)),
+        "Model": "Lognormal (Log-OLS)",
+        "RMSE": rmse(sev_test["ClaimAmount"], sev_lognorm_pred),
+        "MAE": float(mean_absolute_error(sev_test["ClaimAmount"], sev_lognorm_pred)),
+    },
+    {
+        "Model": "Gamma-Pareto Hybrid",
+        "RMSE": rmse(sev_test["ClaimAmount"], sev_gp_pred),
+        "MAE": float(mean_absolute_error(sev_test["ClaimAmount"], sev_gp_pred)),
     },
 ]
-
-xgb_sev = None
-if XGB_AVAILABLE:
-    xgb_sev = XGBRegressor(
-        n_estimators=300, max_depth=6, learning_rate=0.05, subsample=0.8,
-        colsample_bytree=0.8, random_state=42
-    )
-    xgb_sev.fit(sev_train[features], sev_train["ClaimAmount"])
-    xgb_sev_pred = np.clip(xgb_sev.predict(sev_test[features]), 0, None)
-    sev_models.append(
-        {
-            "Model": "XGBoost",
-            "RMSE": rmse(sev_test["ClaimAmount"], xgb_sev_pred),
-            "MAE": float(mean_absolute_error(sev_test["ClaimAmount"], xgb_sev_pred)),
-        }
-    )
 
 sev_results = pd.DataFrame(sev_models).sort_values("RMSE")
 best_sev_model_name = sev_results.iloc[0]["Model"]
 if best_sev_model_name == "Gamma GLM":
-    df["Pred_Sev"] = np.clip(sev_glm.predict(df), 0, None)
-elif best_sev_model_name == "Random Forest":
-    df["Pred_Sev"] = np.clip(rf_sev.predict(df[features]), 0, None)
+    df["Pred_Sev"] = np.clip(sev_gamma.predict(df), 0, None)
+elif best_sev_model_name == "Lognormal (Log-OLS)":
+    df["Pred_Sev"] = np.clip(np.exp(sev_lognorm.predict(df) + 0.5 * log_sigma2), 0, None)
 else:
-    df["Pred_Sev"] = np.clip(xgb_sev.predict(df[features]), 0, None)
+    gamma_all = np.clip(sev_gamma.predict(df), 0, None)
+    tail_weight_all = 1.0 / (1.0 + np.exp(-(gamma_all - tail_threshold) / tail_scale))
+    df["Pred_Sev"] = np.clip(
+        (1.0 - tail_weight_all) * gamma_all + tail_weight_all * pareto_tail_mean,
+        0,
+        None,
+    )
+
+# ML benchmark for explainability tab
+rf_sev = RandomForestRegressor(
+    n_estimators=300, max_depth=12, random_state=42, n_jobs=-1
+)
+rf_sev.fit(sev_train[features], sev_train["ClaimAmount"])
 
 df["Pure_Premium_Base"] = df["Pred_Claim_Count"] * df["Pred_Sev"]
 
@@ -292,8 +315,8 @@ with tabs[1]:
 
     fig = plt.figure(figsize=(9, 4))
     plt.hist(test_df["Observed_Freq"], bins=60, alpha=0.5, label="Observed")
-    plt.hist(freq_glm_test_annual, bins=60, alpha=0.5, label="Poisson GLM")
-    plt.hist(rf_freq_test_annual, bins=60, alpha=0.5, label="Random Forest")
+    plt.hist(freq_poisson_test_annual, bins=60, alpha=0.5, label="Poisson GLM")
+    plt.hist(freq_nb_test_annual, bins=60, alpha=0.5, label="Negative Binomial GLM")
     plt.legend()
     plt.title("Frequency Comparison on Test Set")
     st.pyplot(fig)
@@ -304,10 +327,9 @@ with tabs[1]:
 
     fig = plt.figure(figsize=(9, 4))
     plt.hist(sev_test["ClaimAmount"], bins=60, alpha=0.5, label="Observed")
-    plt.hist(sev_glm_pred, bins=60, alpha=0.5, label="Gamma GLM")
-    plt.hist(rf_sev_pred, bins=60, alpha=0.5, label="Random Forest")
-    if XGB_AVAILABLE:
-        plt.hist(xgb_sev_pred, bins=60, alpha=0.4, label="XGBoost")
+    plt.hist(sev_gamma_pred, bins=60, alpha=0.5, label="Gamma GLM")
+    plt.hist(sev_lognorm_pred, bins=60, alpha=0.5, label="Lognormal")
+    plt.hist(sev_gp_pred, bins=60, alpha=0.5, label="Gamma-Pareto")
     plt.legend()
     plt.title("Severity Comparison on Test Set")
     st.pyplot(fig)
@@ -341,11 +363,11 @@ with tabs[3]:
     st.header("ML & Explainability")
     st.subheader("Lift Curve (Best Severity Model)")
     if best_sev_model_name == "Gamma GLM":
-        sev_test_pred_for_lift = sev_glm_pred
-    elif best_sev_model_name == "Random Forest":
-        sev_test_pred_for_lift = rf_sev_pred
+        sev_test_pred_for_lift = sev_gamma_pred
+    elif best_sev_model_name == "Lognormal (Log-OLS)":
+        sev_test_pred_for_lift = sev_lognorm_pred
     else:
-        sev_test_pred_for_lift = xgb_sev_pred
+        sev_test_pred_for_lift = sev_gp_pred
 
     lift_df = build_lift_table(
         actual=sev_test["ClaimAmount"].reset_index(drop=True),
