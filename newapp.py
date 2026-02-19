@@ -131,7 +131,7 @@ st.header("5. SHAP Explainability (Frequency Model)")
 
 st.write("Training a Random Forest on ClaimNb for SHAP explanations (not for pricing, just interpretation).")
 
-features = ["VehPower", "VehAge", "DrivAge", "BonusMalus", "Density_log"]
+features = ["VehPower", "VehAge", "DrivAge", "BonusMalus", "Density"]
 X = df[features]
 y = df["ClaimNb"]
 
