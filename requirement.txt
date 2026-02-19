@@ -1,6 +1,7 @@
 streamlit
-numpy 
+numpy
 pandas
 matplotlib
-statsmodel
+statsmodels
 plotly
+scikit-learn
