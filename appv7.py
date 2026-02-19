@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import statsmodels.api as sm
 from statsmodels.formula.api import glm
-from statsmodels.genmod.families import Poisson, Gamma
+from statsmodels.genmod.families import Poisson, Gamma, NegativeBinomial
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 from sklearn.ensemble import RandomForestRegressor
@@ -16,6 +16,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 from reportlab.platypus import TableStyle
 from reportlab.lib.units import inch
+from statsmodels.discrete.count_model import ZeroInflatedPoisson
 
 st.set_page_config(layout="wide")
 st.title("📊 End-to-End Actuarial Insurance Modeling Platform")
@@ -49,6 +50,74 @@ df = load_data()
 
 st.success(f"Data loaded successfully. Records: {len(df)}")
 st.dataframe(df.head())
+
+
+# =====================================================
+# CREATE TABS
+# =====================================================
+
+tabs = st.tabs([
+    "📂 Data Overview",
+    "📈 Pricing Models",
+    "💰 Premium & Adjustments",
+    "🤖 ML & Explainability",
+    "📊 IBNR Reserving",
+    "⚠️ Risk Simulation",
+    "🛡 Reinsurance",
+    "📄 Reporting"
+])
+
+# =====================================================
+# TAB 1: DATA
+# =====================================================
+
+with tabs[0]:
+    st.header("Data Overview")
+    st.write("Number of records:", len(df))
+    st.dataframe(df.head())
+
+
+
+# =====================================================
+# MODEL TRAINING
+# =====================================================
+st.header("1. Model Training")
+
+freq_formula = "ClaimNb ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region)"
+sev_formula  = "ClaimAmount ~ VehPower + VehAge + DrivAge + BonusMalus + C(Region)"
+
+st.write("Training Poisson frequency model...")
+freq_pois = glm(freq_formula, data=df, family=Poisson()).fit()
+
+st.write("Training Negative Binomial frequency model...")
+freq_nb = glm(freq_formula, data=df, family=NegativeBinomial()).fit()
+
+st.write("Training Zero-Inflated Poisson frequency model...")
+zip_exog = df[["VehPower", "VehAge", "DrivAge", "BonusMalus"]]
+zip_endog = df["ClaimNb"]
+freq_zip = ZeroInflatedPoisson(zip_endog, zip_exog, exog_infl=zip_exog, inflation="logit").fit(disp=0)
+
+st.write("Training Gamma severity model (ClaimNb > 0)...")
+sev_data = df[df["ClaimNb"] > 0].copy()
+sev = glm(sev_formula, data=sev_data, family=Gamma()).fit()
+
+st.success("All models trained.")
+
+# =====================================================
+# MODEL COMPARISON (Poisson vs NB vs ZIP)
+# =====================================================
+st.header("2. Model Comparison (Frequency)")
+
+col_aic1, col_aic2, col_aic3 = st.columns(3)
+with col_aic1:
+    st.metric("Poisson AIC", f"{freq_pois.aic:.1f}")
+with col_aic2:
+    st.metric("NegBin AIC", f"{freq_nb.aic:.1f}")
+with col_aic3:
+    st.metric("ZIP AIC", f"{freq_zip.aic:.1f}")
+
+st.write("Lower AIC (or higher log-likelihood) indicates better fit. Use this to justify Poisson vs NB vs ZIP.")
+
 
 # =====================================================
 # FREQUENCY MODEL (POISSON GLM)
@@ -147,6 +216,35 @@ fig3 = plt.figure(figsize=(12,6))
 plt.hist(df["Pure_Premium"], bins=50)
 plt.title("Pure Premium Distribution")
 st.pyplot(fig3)
+
+
+# =====================================================
+# MODULE 5: RESERVING (CHAIN LADDER)
+# =====================================================
+
+elif module == "Reserving":
+
+    st.header("📊 Chain Ladder Reserving")
+
+    triangle = pd.DataFrame({
+        0: [1000,1200,1500,1300],
+        1: [1500,1700,2000,None],
+        2: [1800,2100,None,None],
+        3: [2000,None,None,None]
+    })
+
+    st.write("Loss Development Triangle")
+    st.write(triangle)
+
+    # Simple development factors
+    factors = []
+    for i in range(3):
+        num = triangle[i+1].sum(skipna=True)
+        den = triangle[i].sum(skipna=True)
+        factors.append(num/den)
+
+    st.write("Development Factors:", factors)
+
 
 # =====================================================
 # MACHINE LEARNING BENCHMARK

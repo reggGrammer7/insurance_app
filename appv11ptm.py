@@ -85,7 +85,7 @@ with tabs[1]:
 
     df["Pred_Freq"] = freq_model.predict(df, offset=np.log(df["Exposure"]))
 
-    st.write("Average Frequency:", round(df["Pred_Freq"].mean(), 4))
+    st.write("Predicted Frequency:", round(df["Pred_Freq"], 4))
 
     fig = plt.figure(figsize=(10,5))
     plt.hist(df["Pred_Freq"], bins=50)
