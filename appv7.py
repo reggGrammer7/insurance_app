@@ -65,7 +65,7 @@ freq_model = glm(
 
 df["Pred_Freq"] = freq_model.predict(df, offset=np.log(df["Exposure"]))
 
-st.write("Average Predicted Frequency:", df["Pred_Freq"])
+st.write(" Predicted Frequency:", df["Pred_Freq"])
 
 fig1 = plt.figure(figsize=(12,6))
 plt.hist(df["Pred_Freq"], bins=50)
@@ -88,7 +88,7 @@ sev_model = glm(
 
 df["Pred_Sev"] = sev_model.predict(df)
 
-st.write("Average Predicted Severity:", round(df["Pred_Sev"].mean(),2))
+st.write("Predicted Severity:", df["Pred_Sev"])
 
 fig2 = plt.figure(figsize=(12,6))
 plt.hist(sev_df["ClaimAmount"], bins=50)
