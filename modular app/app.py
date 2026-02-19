@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import streamlit as st
 
 from data import load_data
 from frequency import train_frequency_models, predict_frequency
@@ -54,11 +55,25 @@ def _build_proxy_triangle(df: pd.DataFrame, n_accident_years: int = 6, n_dev_per
     return cumulative
 
 
-def run_pipeline():
-    df = load_data()
-    print(f"Loaded rows: {len(df):,}")
+@st.cache_data(show_spinner=False)
+def load_data_cached():
+    return load_data()
 
-    train_df, test_df = _split_train_test(df)
+
+def run_pipeline(
+    train_frac: float,
+    deductible: float,
+    inflation: float,
+    years: int,
+    expense_loading: float,
+    profit_loading: float,
+    quota: float,
+    n_sim: int,
+    seed: int,
+):
+    df = load_data_cached()
+
+    train_df, test_df = _split_train_test(df, train_frac=train_frac)
 
     poisson_model, nb_model = train_frequency_models(train_df)
     test_df["Pred_Freq_Pois"] = predict_frequency(poisson_model, test_df)
@@ -97,26 +112,113 @@ def run_pipeline():
         lambda_mean=lambda_mean,
         sev_mean=max(sev_mean, 1e-6),
         sev_var=max(sev_var, 1e-6),
-        n_sim=10000,
-        seed=42,
+        n_sim=n_sim,
+        seed=seed,
     )
 
-    qs_ceded, qs_net = apply_quota_share(agg_losses, quota=0.30)
+    qs_ceded, qs_net = apply_quota_share(agg_losses, quota=quota)
     xol_ceded, xol_net = apply_xol(agg_losses, retention=np.percentile(agg_losses, 90))
 
-    print("\nPipeline summary")
-    print(f"Average technical premium: {priced_df['Technical_Premium'].mean():,.2f}")
-    print(f"Total IBNR (proxy triangle): {reserve_result['total_ibnr']:,.2f}")
-    print(f"Quota Share ceded / net: {qs_ceded:,.2f} / {qs_net:,.2f}")
-    print(f"XoL ceded / net: {xol_ceded:,.2f} / {xol_net:,.2f}")
-
     return {
+        "rows_loaded": len(df),
         "priced_df": priced_df,
         "triangle": triangle,
         "reserve_result": reserve_result,
         "agg_losses": agg_losses,
+        "summary": {
+            "avg_technical_premium": float(priced_df["Technical_Premium"].mean()),
+            "total_ibnr": float(reserve_result["total_ibnr"]),
+            "qs_ceded": float(qs_ceded),
+            "qs_net": float(qs_net),
+            "xol_ceded": float(xol_ceded),
+            "xol_net": float(xol_net),
+        },
     }
 
 
+def main():
+    st.set_page_config(page_title="Insurance Modular App", layout="wide")
+    st.title("Insurance Modular App")
+    st.caption("Frequency, severity, premium, reserving, capital simulation, and reinsurance")
+
+    with st.sidebar:
+        st.header("Parameters")
+        train_frac = st.slider("Train fraction", min_value=0.5, max_value=0.95, value=0.8, step=0.05)
+        deductible = st.number_input("Deductible", min_value=0.0, value=200.0, step=50.0)
+        inflation = st.number_input("Inflation", min_value=0.0, max_value=1.0, value=0.05, step=0.01)
+        years = st.number_input("Projection years", min_value=0, max_value=30, value=1, step=1)
+        expense_loading = st.number_input("Expense loading", min_value=0.0, max_value=2.0, value=0.20, step=0.01)
+        profit_loading = st.number_input("Profit loading", min_value=0.0, max_value=2.0, value=0.05, step=0.01)
+        quota = st.slider("Quota share", min_value=0.0, max_value=1.0, value=0.30, step=0.05)
+        n_sim = st.number_input("Simulation runs", min_value=1000, max_value=200000, value=10000, step=1000)
+        seed = st.number_input("Random seed", min_value=0, max_value=1000000, value=42, step=1)
+        run_clicked = st.button("Run Analysis", type="primary")
+
+    if not run_clicked:
+        st.info("Set parameters in the sidebar and click Run Analysis.")
+        return
+
+    try:
+        with st.spinner("Running actuarial pipeline..."):
+            result = run_pipeline(
+                train_frac=float(train_frac),
+                deductible=float(deductible),
+                inflation=float(inflation),
+                years=int(years),
+                expense_loading=float(expense_loading),
+                profit_loading=float(profit_loading),
+                quota=float(quota),
+                n_sim=int(n_sim),
+                seed=int(seed),
+            )
+    except Exception as exc:
+        st.error("Pipeline failed. See details below.")
+        st.exception(exc)
+        st.stop()
+
+    summary = result["summary"]
+    st.success(f"Loaded rows: {result['rows_loaded']:,}")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Avg Technical Premium", f"{summary['avg_technical_premium']:,.2f}")
+    c2.metric("Total IBNR", f"{summary['total_ibnr']:,.2f}")
+    c3.metric("Quota Share Net", f"{summary['qs_net']:,.2f}")
+
+    c4, c5, c6 = st.columns(3)
+    c4.metric("Quota Share Ceded", f"{summary['qs_ceded']:,.2f}")
+    c5.metric("XoL Net", f"{summary['xol_net']:,.2f}")
+    c6.metric("XoL Ceded", f"{summary['xol_ceded']:,.2f}")
+
+    st.subheader("Premium Output Sample")
+    st.dataframe(
+        result["priced_df"][
+            [
+                "Exposure",
+                "ClaimNb",
+                "ClaimAmount",
+                "Pred_Freq",
+                "Pred_Sev",
+                "Adj_Sev",
+                "Pure_Premium",
+                "Technical_Premium",
+            ]
+        ].head(50)
+    )
+
+    st.subheader("Reserving")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.write("Observed Cumulative Triangle")
+        st.dataframe(result["triangle"])
+    with col_b:
+        st.write("IBNR Summary")
+        st.dataframe(result["reserve_result"]["ibnr_summary"])
+
+    st.subheader("Aggregate Loss Simulation")
+    sim_series = pd.Series(result["agg_losses"], name="aggregate_loss")
+    st.line_chart(sim_series.rolling(window=100, min_periods=1).mean())
+    st.caption("Chart shows rolling mean of simulated aggregate losses (window=100).")
+
+
 if __name__ == "__main__":
-    run_pipeline()
+    main()
